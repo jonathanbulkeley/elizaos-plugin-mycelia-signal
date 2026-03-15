@@ -1,6 +1,6 @@
 {
   "name": "@jonathanbulkeley/plugin-mycelia-signal",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Mycelia Signal sovereign oracle plugin for ElizaOS — 56 endpoints covering crypto pairs, FX rates, economic indicators, and commodities. Cryptographically signed attestations via Lightning (L402) or USDC on Base (x402)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
