@@ -1,0 +1,51 @@
+{
+  "name": "@jonathanbulkeley/plugin-mycelia-signal",
+  "version": "1.1.0",
+  "description": "Mycelia Signal sovereign oracle plugin for ElizaOS — 56 endpoints covering crypto pairs, FX rates, economic indicators, and commodities. Cryptographically signed attestations via Lightning (L402) or USDC on Base (x402)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest"
+  },
+  "keywords": [
+    "elizaos",
+    "eliza",
+    "plugin",
+    "oracle",
+    "price-feed",
+    "bitcoin",
+    "crypto",
+    "fx",
+    "forex",
+    "economic-indicators",
+    "commodities",
+    "lightning",
+    "l402",
+    "x402",
+    "defi",
+    "attestation",
+    "ai-agents"
+  ],
+  "author": "Mycelia Signal <info@myceliasignal.com>",
+  "license": "MIT",
+  "homepage": "https://myceliasignal.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonathanbulkeley/elizaos-plugin-mycelia-signal"
+  },
+  "peerDependencies": {
+    "@elizaos/core": "*"
+  },
+  "devDependencies": {
+    "@elizaos/core": "^1.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}
