@@ -30,7 +30,6 @@ const PAIRS: Record<string, { endpoint: string; description: string }> = {
   BTCEUR:      { endpoint: "/oracle/price/btc/eur",      description: "Bitcoin / Euro spot price" },
   BTCEUR_VWAP: { endpoint: "/oracle/price/btc/eur/vwap", description: "Bitcoin / Euro 5-min VWAP" },
   BTCJPY:      { endpoint: "/oracle/price/btc/jpy",      description: "Bitcoin / Japanese Yen spot price" },
-  BTCJPY_VWAP: { endpoint: "/oracle/price/btc/jpy/vwap", description: "Bitcoin / Japanese Yen 5-min VWAP" },
   ETHUSD:      { endpoint: "/oracle/price/eth/usd",      description: "Ethereum / US Dollar spot price" },
   ETHEUR:      { endpoint: "/oracle/price/eth/eur",      description: "Ethereum / Euro spot price" },
   ETHJPY:      { endpoint: "/oracle/price/eth/jpy",      description: "Ethereum / Japanese Yen spot price" },
@@ -266,7 +265,6 @@ const PAIR_KEYWORDS: Record<string, string[]> = {
   BTCEUR:       ["btceur", "btc eur", "bitcoin euro", "btc euro"],
   BTCEUR_VWAP:  ["btceur vwap", "bitcoin euro vwap"],
   BTCJPY:       ["btcjpy", "btc jpy", "bitcoin yen", "btc yen"],
-  BTCJPY_VWAP:  ["btcjpy vwap", "bitcoin yen vwap"],
   ETHUSD:       ["eth", "ethereum", "ethusd", "eth price", "ethereum price", "eth usd"],
   ETHEUR:       ["etheur", "eth eur", "ethereum euro"],
   ETHJPY:       ["ethjpy", "eth jpy", "ethereum yen"],
@@ -416,12 +414,318 @@ function createPriceProvider(config: PluginConfig): Provider {
   };
 }
 
+// ── DLC ACTIONS ─────────────────────────────────────────────────────────────
+
+interface DLCThresholdRequest {
+  pair: string;
+  strike: number;
+  direction: "above" | "below";
+  expiry?: number;
+  webhookUrl?: string;
+}
+
+interface DLCThresholdResponse {
+  status: string;
+  eventid: string;
+  pair: string;
+  strike: number;
+  direction: string;
+  expiry: number;
+  oraclePubkey: string;
+  rpoints: string[];
+  webhookUrl?: string;
+  rail: string;
+  docs?: string;
+}
+
+interface DLCAttestationResponse {
+  eventid: string;
+  outcome: string;
+  attestedAt: string;
+  signature?: string;
+  oraclePubkey?: string;
+}
+
+interface DLCAnnouncement {
+  eventid: string;
+  pair?: string;
+  type?: string;
+  expiry?: number;
+  strike?: number;
+  direction?: string;
+}
+
+async function fetchDLCFree<T>(endpoint: string): Promise<T | null> {
+  try {
+    const r = await fetch(`${BASE_URL}${endpoint}`, { signal: AbortSignal.timeout(20000) });
+    if (r.ok) return await r.json() as T;
+    return null;
+  } catch (err) {
+    console.error(`[mycelia-signal] DLC fetch error ${endpoint}:`, err);
+    return null;
+  }
+}
+
+async function postDLCWithPayment(
+  endpoint: string,
+  body: unknown,
+  config: PluginConfig
+): Promise<DLCThresholdResponse | null> {
+  const url = `${BASE_URL}${endpoint}`;
+  const init = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  };
+  try {
+    const r = await fetch(url, init);
+    if (r.ok) return await r.json() as DLCThresholdResponse;
+
+    if (r.status === 402) {
+      const data = await r.json() as { l402?: { invoice: string; macaroon: string }; x402?: unknown };
+
+      if (data.l402 && config.lightningPreimageFetcher && config.lightningMacaroon) {
+        const preimage = await config.lightningPreimageFetcher(data.l402.invoice);
+        const paid = await fetch(url, {
+          ...init,
+          headers: { ...init.headers, "Authorization": `L402 ${data.l402.macaroon}:${preimage}` },
+        });
+        if (paid.ok) return await paid.json() as DLCThresholdResponse;
+      }
+
+      if (data.x402 && config.x402PaymentHandler) {
+        const header = await config.x402PaymentHandler(data.x402);
+        const paid = await fetch(url, {
+          ...init,
+          headers: { ...init.headers, "X-Payment": header },
+        });
+        if (paid.ok) return await paid.json() as DLCThresholdResponse;
+      }
+    }
+    return null;
+  } catch (err) {
+    console.error(`[mycelia-signal] DLC post error ${endpoint}:`, err);
+    return null;
+  }
+}
+
+function createDLCPreviewAction(config: PluginConfig): Action {
+  return {
+    name: "DLC_THRESHOLD_PREVIEW",
+    description: "Register a free DLC threshold contract preview with Mycelia Signal. Tests the full integration flow without payment. Requires: pair (e.g. BTCUSD), strike (price level), direction (above/below), optional expiry (Unix timestamp).",
+    similes: ["dlc preview", "test dlc", "dlc threshold preview", "free dlc contract", "preview threshold contract"],
+    examples: [[
+      { name: "user",  content: { text: "Test a DLC threshold contract for BTC above 90000" } },
+      { name: "agent", content: { text: "Registering a free DLC threshold preview with Mycelia Signal..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["dlc preview", "test dlc", "preview threshold", "dlc test"].some(k => t.includes(k));
+    },
+    handler: async (
+      _runtime: IAgentRuntime,
+      message: Memory,
+      _state: State | undefined,
+      _options: unknown,
+      callback?: HandlerCallback
+    ): Promise<void> => {
+      const text = message.content?.text ?? "";
+      const strikeMatch = text.match(/\b(\d{4,8})\b/);
+      const dirMatch = text.toLowerCase().includes("below") ? "below" : "above";
+      const pairMatch = text.toUpperCase().match(/\b(BTC|ETH|SOL|XRP|ADA|DOGE|XAU)(USD|EUR|JPY)\b/);
+      const pair = pairMatch ? `${pairMatch[1]}${pairMatch[2]}` : "BTCUSD";
+      const strike = strikeMatch ? parseInt(strikeMatch[1]) : 80000;
+      const expiry = Math.floor(Date.now() / 1000) + 86400 * 30;
+
+      const result = await postDLCWithPayment(
+        "/dlc/oracle/threshold/preview",
+        { pair, strike, direction: dirMatch, expiry },
+        config
+      );
+
+      if (callback) {
+        if (result) {
+          await callback({
+            text: [
+              `**DLC Preview Registered** (free — no payment)`,
+              `Pair: ${result.pair} | Strike: ${result.strike} | Direction: ${result.direction}`,
+              `Event ID: ${result.eventid}`,
+              `Expiry: ${new Date(result.expiry * 1000).toUTCString()}`,
+              `Oracle pubkey: ${result.oraclePubkey?.substring(0, 16)}...`,
+              `Docs: https://myceliasignal.com/docs/dlc`,
+            ].join("\n"),
+            content: result,
+          });
+        } else {
+          await callback({ text: "Unable to register DLC preview. See https://myceliasignal.com/docs/dlc" });
+        }
+      }
+    },
+  };
+}
+
+function createDLCThresholdAction(config: PluginConfig): Action {
+  return {
+    name: "DLC_REGISTER_THRESHOLD",
+    description: "Register a production DLC threshold contract with Mycelia Signal. Payment required: 10,000 sats (L402) or $7.00 USDC (x402). Requires: pair (e.g. BTCUSD), strike price, direction (above/below), optional expiry timestamp and webhook URL.",
+    similes: ["register dlc", "dlc threshold contract", "register threshold", "new dlc contract", "create dlc"],
+    examples: [[
+      { name: "user",  content: { text: "Register a DLC threshold contract for BTC above 90000" } },
+      { name: "agent", content: { text: "Registering a DLC threshold contract with Mycelia Signal..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["register dlc", "dlc threshold", "dlc contract", "create dlc"].some(k => t.includes(k)) &&
+             !t.includes("preview");
+    },
+    handler: async (
+      _runtime: IAgentRuntime,
+      message: Memory,
+      _state: State | undefined,
+      _options: unknown,
+      callback?: HandlerCallback
+    ): Promise<void> => {
+      const text = message.content?.text ?? "";
+      const strikeMatch = text.match(/\b(\d{4,8})\b/);
+      const dirMatch = text.toLowerCase().includes("below") ? "below" : "above";
+      const pairMatch = text.toUpperCase().match(/\b(BTC|ETH|SOL|XRP|ADA|DOGE|XAU)(USD|EUR|JPY)\b/);
+      const pair = pairMatch ? `${pairMatch[1]}${pairMatch[2]}` : "BTCUSD";
+      const strike = strikeMatch ? parseInt(strikeMatch[1]) : 80000;
+      const expiry = Math.floor(Date.now() / 1000) + 86400 * 30;
+
+      const result = await postDLCWithPayment(
+        "/dlc/oracle/threshold",
+        { pair, strike, direction: dirMatch, expiry },
+        config
+      );
+
+      if (callback) {
+        if (result) {
+          await callback({
+            text: [
+              `**DLC Threshold Contract Registered**`,
+              `Pair: ${result.pair} | Strike: ${result.strike} | Direction: ${result.direction}`,
+              `Event ID: ${result.eventid}`,
+              `Expiry: ${new Date(result.expiry * 1000).toUTCString()}`,
+              `Oracle pubkey: ${result.oraclePubkey?.substring(0, 16)}...`,
+              `Payment rail: ${result.rail}`,
+              `Docs: https://myceliasignal.com/docs/dlc`,
+            ].join("\n"),
+            content: result,
+          });
+        } else {
+          await callback({ text: "Unable to register DLC contract. Payment may be required — configure L402 or x402 handler. See https://myceliasignal.com/docs/dlc" });
+        }
+      }
+    },
+  };
+}
+
+function createDLCAttestationAction(): Action {
+  return {
+    name: "DLC_GET_ATTESTATION",
+    description: "Retrieve the Schnorr attestation for a settled DLC contract from Mycelia Signal. Free endpoint. Requires event ID.",
+    similes: ["dlc attestation", "get dlc attestation", "dlc result", "fetch dlc attestation", "check dlc"],
+    examples: [[
+      { name: "user",  content: { text: "Get the DLC attestation for event abc123" } },
+      { name: "agent", content: { text: "Fetching DLC attestation from Mycelia Signal..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["attestation", "dlc result", "check dlc", "get dlc"].some(k => t.includes(k));
+    },
+    handler: async (
+      _runtime: IAgentRuntime,
+      message: Memory,
+      _state: State | undefined,
+      _options: unknown,
+      callback?: HandlerCallback
+    ): Promise<void> => {
+      const text = message.content?.text ?? "";
+      const eventIdMatch = text.match(/\b([a-zA-Z0-9_-]{8,})\b/g);
+      const eventId = eventIdMatch?.find(id => id.length >= 8 && !/^(get|the|for|dlc|event|attestation)$/i.test(id));
+
+      if (!eventId) {
+        if (callback) await callback({ text: "Please provide a DLC event ID. Example: 'Get attestation for event BTCUSD-2026-04-01T00:00:00Z'" });
+        return;
+      }
+
+      const result = await fetchDLCFree<DLCAttestationResponse>(`/dlc/oracle/attestations/${eventId}`);
+
+      if (callback) {
+        if (result) {
+          await callback({
+            text: [
+              `**DLC Attestation**`,
+              `Event ID: ${result.eventid}`,
+              `Outcome: ${result.outcome}`,
+              `Attested at: ${result.attestedAt}`,
+              result.signature ? `Signature: ${result.signature.substring(0, 16)}...` : "",
+              `Verify: https://myceliasignal.com/docs/verification`,
+            ].filter(Boolean).join("\n"),
+            content: result,
+          });
+        } else {
+          await callback({ text: `No attestation found for event ID: ${eventId}. The contract may not have settled yet (HTTP 425 = not yet attested).` });
+        }
+      }
+    },
+  };
+}
+
+function createDLCAnnouncementsAction(): Action {
+  return {
+    name: "DLC_LIST_ANNOUNCEMENTS",
+    description: "List all active DLC announcements from Mycelia Signal oracle. Free endpoint. Returns numeric and threshold contract announcements.",
+    similes: ["list dlc", "dlc announcements", "active dlc contracts", "show dlc contracts", "dlc oracle announcements"],
+    examples: [[
+      { name: "user",  content: { text: "List active DLC announcements" } },
+      { name: "agent", content: { text: "Fetching DLC announcements from Mycelia Signal..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["dlc announcement", "list dlc", "active dlc", "show dlc"].some(k => t.includes(k));
+    },
+    handler: async (
+      _runtime: IAgentRuntime,
+      _message: Memory,
+      _state: State | undefined,
+      _options: unknown,
+      callback?: HandlerCallback
+    ): Promise<void> => {
+      const result = await fetchDLCFree<{ announcements: DLCAnnouncement[] }>("/dlc/oracle/announcements");
+
+      if (callback) {
+        if (result?.announcements?.length) {
+          const lines = result.announcements.slice(0, 10).map(a =>
+            `— ${a.eventid}${a.pair ? ` | ${a.pair}` : ""}${a.strike ? ` | strike: ${a.strike} ${a.direction}` : ""}`
+          );
+          if (result.announcements.length > 10) lines.push(`...and ${result.announcements.length - 10} more`);
+          await callback({
+            text: [`**Active DLC Announcements** (${result.announcements.length} total)`, ...lines, `Docs: https://myceliasignal.com/docs/dlc`].join("\n"),
+            content: result,
+          });
+        } else {
+          await callback({ text: "No active DLC announcements found. See https://myceliasignal.com/docs/dlc" });
+        }
+      }
+    },
+  };
+}
+
 export function createMyceliaSignalPlugin(config: PluginConfig = {}): Plugin {
   return {
     name: "@elizaos/plugin-mycelia-signal",
     description:
-      "Mycelia Signal sovereign oracle — 56 endpoints covering crypto pairs, FX rates, economic indicators, and commodities. Cryptographically signed attestations via Lightning (L402, secp256k1 ECDSA) or USDC on Base (x402, Ed25519). Every response independently verifiable. No vendor trust required.",
-    actions:   Object.keys(PAIRS).map(pair => createPriceAction(pair, config)),
+      "Mycelia Signal sovereign oracle — 56 price/FX/macro/commodity endpoints plus Bitcoin DLC oracle. Cryptographically signed attestations via Lightning (L402) or USDC on Base (x402). Every response independently verifiable. No vendor trust required.",
+    actions: [
+      ...Object.keys(PAIRS).map(pair => createPriceAction(pair, config)),
+      createDLCPreviewAction(config),
+      createDLCThresholdAction(config),
+      createDLCAttestationAction(),
+      createDLCAnnouncementsAction(),
+    ],
     providers: [createPriceProvider(config)],
   };
 }
