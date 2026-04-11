@@ -1,7 +1,7 @@
 /**
  * Mycelia Signal Plugin for ElizaOS
  *
- * Cryptographically signed price attestations for 56 endpoints:
+ * Cryptographically signed price attestations for 66 endpoints:
  * crypto pairs, FX rates, economic indicators, and commodities.
  * Pay per query via Lightning (L402) or USDC on Base (x402).
  * Every response is independently verifiable. No vendor trust required.
@@ -39,6 +39,14 @@ const PAIRS: Record<string, { endpoint: string; description: string }> = {
   XRPUSD:      { endpoint: "/oracle/price/xrp/usd",      description: "XRP / US Dollar spot price" },
   ADAUSD:      { endpoint: "/oracle/price/ada/usd",      description: "Cardano / US Dollar spot price" },
   DOGEUSD:     { endpoint: "/oracle/price/doge/usd",     description: "Dogecoin / US Dollar spot price" },
+  // ── Stablecoin pegs ───────────────────────────────────────────────────────
+  USDTUSD:     { endpoint: "/oracle/price/usdt/usd",     description: "Tether / US Dollar peg" },
+  USDCUSD:     { endpoint: "/oracle/price/usdc/usd",     description: "USD Coin / US Dollar peg" },
+  USDTEUR:     { endpoint: "/oracle/price/usdt/eur",     description: "Tether / Euro peg" },
+  USDTJPY:     { endpoint: "/oracle/price/usdt/jpy",     description: "Tether / Japanese Yen peg" },
+  // ── Additional VWAP ───────────────────────────────────────────────────────
+  ETHUSD_VWAP: { endpoint: "/oracle/price/eth/usd/vwap", description: "Ethereum / US Dollar 5-min VWAP" },
+  BTCEUR_VWAP: { endpoint: "/oracle/price/btc/eur/vwap", description: "Bitcoin / Euro 5-min VWAP" },
   // ── Precious metals ───────────────────────────────────────────────────────
   XAUUSD:      { endpoint: "/oracle/price/xau/usd",      description: "Gold / US Dollar spot price" },
   XAUEUR:      { endpoint: "/oracle/price/xau/eur",      description: "Gold / Euro spot price" },
@@ -316,6 +324,12 @@ const PAIR_KEYWORDS: Record<string, string[]> = {
   NATGAS:       ["natgas", "natural gas", "henry hub"],
   COPPER:       ["copper", "copper price"],
   DXY:          ["dxy", "dollar index", "us dollar index"],
+  USDTUSD:     ["usdt", "tether", "usdt usd", "tether price", "usdt peg"],
+  USDCUSD:     ["usdc", "usd coin", "usdc usd", "usdc price", "usdc peg"],
+  USDTEUR:     ["usdt eur", "tether euro"],
+  USDTJPY:     ["usdt jpy", "tether yen"],
+  ETHUSD_VWAP: ["eth vwap", "ethereum vwap", "vwap ethereum", "eth usd vwap"],
+  BTCEUR_VWAP: ["btceur vwap", "bitcoin euro vwap", "btc eur vwap"],
 };
 
 function createPriceAction(pair: string, config: PluginConfig): Action {
@@ -410,6 +424,104 @@ function createPriceProvider(config: PluginConfig): Provider {
           canonical: getCanonical(result.attestation),
         },
       };
+    },
+  };
+}
+
+function createMSVIAction(config: PluginConfig): Action {
+  return {
+    name: "GET_MSVI",
+    description: "Get the Mycelia Signal Volatility Index (MSVI) for BTC or ETH. Five-component composite: Realized Vol (Parkinson 30D), Implied Vol (Deribit ATM), Term Structure (7D/90D), Funding Rate signal, Put/Call Ratio. Output: 0-100 index. Ed25519 signed.",
+    similes: ["msvi", "volatility index", "crypto volatility", "btc volatility", "eth volatility", "vol index"],
+    examples: [[
+      { name: "user",  content: { text: "What is the MSVI for BTC?" } },
+      { name: "agent", content: { text: "Fetching Mycelia Signal Volatility Index for BTC..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["msvi", "volatility index", "vol index", "crypto volatility", "btc volatility", "eth volatility"].some(k => t.includes(k));
+    },
+    handler: async (_runtime: IAgentRuntime, message: Memory, _state: State | undefined, _options: unknown, callback?: HandlerCallback): Promise<void> => {
+      const text = (message.content?.text ?? "").toLowerCase();
+      const isEth = text.includes("eth") || text.includes("ethereum");
+      const endpoint = isEth ? "/oracle/volatility/eth/usd" : "/oracle/volatility/btc/usd";
+      const pair = isEth ? "ETHUSD" : "BTCUSD";
+      const result = await fetchAttestation(endpoint, config);
+      if (callback) {
+        if (result) {
+          const parts = getCanonical(result.attestation).split("|");
+          await callback({
+            text: [`**MSVI ${pair}**: ${parts[4] ?? "?"} (${parts[5] ?? "index"})`, `Components: ${parts[7] ?? ""}`, `Confidence: ${parts[8]?.replace("CONFIDENCE:", "") ?? ""}`, `Signature: ${result.attestation.signature?.substring(0, 16)}...`, `Docs: https://myceliasignal.com/docs/indices/`].join("\n"),
+            content: { pair, canonical: getCanonical(result.attestation), signature: result.attestation.signature },
+          });
+        } else {
+          await callback({ text: "Unable to fetch MSVI. Payment may be required. See https://myceliasignal.com/docs/indices/" });
+        }
+      }
+    },
+  };
+}
+
+function createMSXIAction(config: PluginConfig): Action {
+  return {
+    name: "GET_MSXI",
+    description: "Get the Mycelia Signal Sentiment Index (MSXI) for BTC or ETH. Five-component composite: Funding Rate direction, Options Skew (25D risk reversal), Put/Call Ratio, Term Structure slope, Cross-exchange Basis. Output: -100 to +100. Positive=bullish, negative=bearish. Ed25519 signed.",
+    similes: ["msxi", "sentiment index", "market sentiment", "btc sentiment", "eth sentiment", "crypto sentiment", "positioning"],
+    examples: [[
+      { name: "user",  content: { text: "What is the market sentiment for BTC?" } },
+      { name: "agent", content: { text: "Fetching Mycelia Signal Sentiment Index for BTC..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["msxi", "sentiment index", "market sentiment", "btc sentiment", "eth sentiment", "crypto sentiment", "positioning"].some(k => t.includes(k));
+    },
+    handler: async (_runtime: IAgentRuntime, message: Memory, _state: State | undefined, _options: unknown, callback?: HandlerCallback): Promise<void> => {
+      const text = (message.content?.text ?? "").toLowerCase();
+      const isEth = text.includes("eth") || text.includes("ethereum");
+      const endpoint = isEth ? "/oracle/sentiment/eth/usd" : "/oracle/sentiment/btc/usd";
+      const pair = isEth ? "ETHUSD" : "BTCUSD";
+      const result = await fetchAttestation(endpoint, config);
+      if (callback) {
+        if (result) {
+          const parts = getCanonical(result.attestation).split("|");
+          await callback({
+            text: [`**MSXI ${pair}**: ${parts[4] ?? "?"} — ${parts[7]?.replace("REGIME:", "") ?? ""}`, `Components: ${parts[6] ?? ""}`, `Confidence: ${parts[8]?.replace("CONFIDENCE:", "") ?? ""}`, `Signature: ${result.attestation.signature?.substring(0, 16)}...`, `Docs: https://myceliasignal.com/docs/indices/`].join("\n"),
+            content: { pair, canonical: getCanonical(result.attestation), signature: result.attestation.signature },
+          });
+        } else {
+          await callback({ text: "Unable to fetch MSXI. Payment may be required. See https://myceliasignal.com/docs/indices/" });
+        }
+      }
+    },
+  };
+}
+
+function createMSSIAction(config: PluginConfig): Action {
+  return {
+    name: "GET_MSSI",
+    description: "Get the Mycelia Signal Stress Index (MSSI) — market-wide systemic stress indicator. Three components: Volatility Regime (MSVI average), Stablecoin Stress (USDT/USDC peg deviation), Funding Extremity (absolute z-score). Output: 0-100. Regimes: CALM/ELEVATED/HIGH/EXTREME. Ed25519 signed.",
+    similes: ["mssi", "stress index", "market stress", "crypto stress", "systemic stress", "stress level"],
+    examples: [[
+      { name: "user",  content: { text: "What is the current market stress level?" } },
+      { name: "agent", content: { text: "Fetching Mycelia Signal Stress Index..." } },
+    ]],
+    validate: async (_runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+      const t = (message.content?.text ?? "").toLowerCase();
+      return ["mssi", "stress index", "market stress", "crypto stress", "systemic stress", "stress level"].some(k => t.includes(k));
+    },
+    handler: async (_runtime: IAgentRuntime, _message: Memory, _state: State | undefined, _options: unknown, callback?: HandlerCallback): Promise<void> => {
+      const result = await fetchAttestation("/oracle/stress/market", config);
+      if (callback) {
+        if (result) {
+          const parts = getCanonical(result.attestation).split("|");
+          await callback({
+            text: [`**MSSI MARKET**: ${parts[4] ?? "?"} — ${parts[7]?.replace("REGIME:", "") ?? ""}`, `Components: ${parts[6] ?? ""}`, `Confidence: ${parts[8]?.replace("CONFIDENCE:", "") ?? ""}`, `Signature: ${result.attestation.signature?.substring(0, 16)}...`, `Docs: https://myceliasignal.com/docs/indices/`].join("\n"),
+            content: { scope: "MARKET", canonical: getCanonical(result.attestation), signature: result.attestation.signature },
+          });
+        } else {
+          await callback({ text: "Unable to fetch MSSI. Payment may be required. See https://myceliasignal.com/docs/indices/" });
+        }
+      }
     },
   };
 }
@@ -718,9 +830,12 @@ export function createMyceliaSignalPlugin(config: PluginConfig = {}): Plugin {
   return {
     name: "@elizaos/plugin-mycelia-signal",
     description:
-      "Mycelia Signal sovereign oracle — 56 price/FX/macro/commodity endpoints plus Bitcoin DLC oracle. Cryptographically signed attestations via Lightning (L402) or USDC on Base (x402). Every response independently verifiable. No vendor trust required.",
+      "Mycelia Signal sovereign oracle — 66 endpoints: price/FX/macro/commodity plus MSVI volatility, MSXI sentiment, and MSSI stress indices, plus Bitcoin DLC oracle. Cryptographically signed attestations via Lightning (L402) or USDC on Base (x402). Every response independently verifiable. No vendor trust required.",
     actions: [
       ...Object.keys(PAIRS).map(pair => createPriceAction(pair, config)),
+      createMSVIAction(config),
+      createMSXIAction(config),
+      createMSSIAction(config),
       createDLCPreviewAction(config),
       createDLCThresholdAction(config),
       createDLCAttestationAction(),
