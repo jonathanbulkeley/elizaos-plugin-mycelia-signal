@@ -46,7 +46,6 @@ const PAIRS: Record<string, { endpoint: string; description: string }> = {
   USDTJPY:     { endpoint: "/oracle/price/usdt/jpy",     description: "Tether / Japanese Yen peg" },
   // ── Additional VWAP ───────────────────────────────────────────────────────
   ETHUSD_VWAP: { endpoint: "/oracle/price/eth/usd/vwap", description: "Ethereum / US Dollar 5-min VWAP" },
-  BTCEUR_VWAP: { endpoint: "/oracle/price/btc/eur/vwap", description: "Bitcoin / Euro 5-min VWAP" },
   // ── Precious metals ───────────────────────────────────────────────────────
   XAUUSD:      { endpoint: "/oracle/price/xau/usd",      description: "Gold / US Dollar spot price" },
   XAUEUR:      { endpoint: "/oracle/price/xau/eur",      description: "Gold / Euro spot price" },
@@ -329,7 +328,6 @@ const PAIR_KEYWORDS: Record<string, string[]> = {
   USDTEUR:     ["usdt eur", "tether euro"],
   USDTJPY:     ["usdt jpy", "tether yen"],
   ETHUSD_VWAP: ["eth vwap", "ethereum vwap", "vwap ethereum", "eth usd vwap"],
-  BTCEUR_VWAP: ["btceur vwap", "bitcoin euro vwap", "btc eur vwap"],
 };
 
 function createPriceAction(pair: string, config: PluginConfig): Action {
